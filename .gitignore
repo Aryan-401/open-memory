@@ -25,6 +25,7 @@ htmlcov/
 .pyre/
 .pytype/
 .ruff_cache/
+.claude/
 
 # IDE/editor
 .vscode/
