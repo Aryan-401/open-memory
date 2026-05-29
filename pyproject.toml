@@ -1,0 +1,95 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "open-memory"
+version = "0.1.0"
+description = "Pluggable context-management strategies for OpenAI-compliant LLM apps: buffer, window, vector (Qdrant), hybrid, and hierarchical memory behind one async, session-scoped interface."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Aryan Raj Garg", email = "aryan.raj.garg@gmail.com" }]
+keywords = ["llm", "memory", "context", "rag", "qdrant", "openai", "litellm", "agents"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.5",
+    "pydantic-settings>=2.1",
+    "qdrant-client>=1.9",
+    "openai>=1.30",
+    "aiosqlite>=0.20",
+    "tiktoken>=0.6",
+    "networkx>=3.2",
+    "anyio>=4.3",
+]
+
+[project.optional-dependencies]
+litellm = ["litellm>=1.40"]
+local-llm = [
+    "sentence-transformers>=2.7",
+    "transformers>=4.40",
+    "huggingface-hub>=0.23",
+    "torch>=2.2",
+]
+dev = [
+    "pytest>=8.1",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.4",
+    "mypy>=1.10",
+]
+# Provider SDKs so you can paste an API key and run anything under examples/.
+# Chat for Claude/Gemini/Groq/HuggingFace is routed through LiteLLM; OpenAI is native.
+examples = [
+    "openai>=1.30",
+    "litellm>=1.40",
+    "anthropic>=0.30",
+    "google-genai>=0.3",
+    "groq>=0.9",
+    "huggingface-hub>=0.23",
+    "sentence-transformers>=2.7",
+    "transformers>=4.40",
+]
+all = [
+    "litellm>=1.40",
+    "sentence-transformers>=2.7",
+    "transformers>=4.40",
+    "huggingface-hub>=0.23",
+    "torch>=2.2",
+    "anthropic>=0.30",
+    "google-genai>=0.3",
+    "groq>=0.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/aryan-401/open-memory"
+Repository = "https://github.com/aryan-401/open-memory"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/openmemory"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "W"]
+ignore = ["B008"]
+
+[tool.mypy]
+python_version = "3.10"
+warn_unused_ignores = true
+ignore_missing_imports = true
+files = ["src/openmemory"]
