@@ -61,11 +61,26 @@ async def test_sync_wrapper_raises_inside_loop():
         chat.add({"role": "user", "content": "x"})
 
 
-@pytest.mark.parametrize("cls", [SummaryMemory, FactExtractionMemory, GraphMemory])
-async def test_scaffold_strategies_raise_not_implemented(cls):
-    mem = cls("s1")
-    with pytest.raises(NotImplementedError):
-        await mem.aadd({"role": "user", "content": "x"})
+async def test_all_strategies_selectable_via_client(store, embedder, llm, vectors):
+    """All eight strategies can be instantiated via OpenMemory.session()."""
+    from openmemory.config import Config
+    cfg = Config(
+        embedder_provider="openai",
+        llm_provider="openai",
+        session_store="memory",
+    )
+    mem = OpenMemory(cfg)
+    # Wire shared resources manually to avoid API calls.
+    mem._store = store
+    mem._embedder = embedder
+    mem._llm = llm
+    mem._vectors = vectors
+    mem._fact_vectors = vectors  # reuse for simplicity in this test
+
+    for strategy in ["buffer", "window", "vector", "hybrid", "hierarchical",
+                     "summary", "facts", "graph"]:
+        sess = mem.session("check", strategy=strategy)  # type: ignore[arg-type]
+        assert sess is not None
 
 
 def test_config_env_prefix(monkeypatch):
