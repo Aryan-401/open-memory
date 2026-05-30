@@ -43,6 +43,9 @@ python examples/03_vector.py        # semantic retrieval (Qdrant)
 python examples/04_hybrid.py        # recency + semantic, merged
 python examples/05_hierarchical.py  # working context + summary + archival
 python examples/06_live_chat.py     # interactive REPL — swap modes live
+python examples/07_summary.py       # rolling LLM summary + recent buffer
+python examples/08_facts.py         # atomic fact extraction + deduplication
+python examples/09_graph.py         # knowledge graph (networkx triplets)
 ```
 
 ---
@@ -156,6 +159,27 @@ The prompt shows the active strategy and, in semantic modes, the active embed mo
 3. **Merge**: collect all unique messages by id (any message present in both branches
    is counted once). Sort the merged set chronologically.
 
+**`summary`**
+1. Load all stored messages from the session store.
+2. Split off any leading `system` message.
+3. The buffer tail (last `buffer_size` messages) is kept verbatim. Everything older is
+   covered by the rolling summary (produced lazily at `aadd` time, not on `aget_context`).
+4. Assemble: `system (if any) → summary block (if any) → buffer`.
+
+**`facts`**
+1. Embed the query → ANN search in the dedicated `{collection}_facts` Qdrant collection
+   (separate from the main message store, holds only extracted fact strings).
+2. Return the top-k matching facts as a single `system` message:
+   `"Known facts:\n- fact1\n- fact2\n…"`
+3. Without a query, return all known facts (from the in-process list).
+
+**`graph`**
+1. Extract entity names from the query (heuristic: capitalised words).
+2. Traverse the session's `networkx.DiGraph` up to `hops` steps from each entity.
+3. Return the relevant `(subject, predicate, object)` triplets as a single `system` message:
+   `"Knowledge graph context:\n- Alice works_with Bob\n…"`
+4. Without a query, return all edges in the graph.
+
 **`hierarchical`** (MemGPT-style)
 1. Load all stored messages. Split off any leading `system` message.
 2. Walk the remaining body tail-first, fitting messages within `working_context_tokens`.
@@ -241,15 +265,69 @@ is active.
 
 ---
 
+---
+
+### `summary` — rolling summary + verbatim recent buffer
+
+**What it does** — LangChain ConversationSummaryBufferMemory pattern, two tiers, no
+vector store required:
+
+1. Append new messages to the session store.
+2. If the buffer (`buffer_size` recent messages) has been exceeded, fold the overflow into
+   a rolling summary via an LLM call (`Summarizer`).
+3. `aget_context` returns: `[system] + [summary-as-system] + [buffer]`.
+
+**Separate LLM**: set `OPENMEMORY_SUMMARY_LLM_PROVIDER` / `OPENMEMORY_SUMMARY_LLM_MODEL`
+to use a different (e.g. cheaper/faster) model for compression than for chat.
+
+---
+
+### `facts` — atomic fact extraction + deduplication (mem0-style)
+
+**What it does** — instead of storing raw turns, an LLM distils each exchange into a
+list of durable atomic facts and stores them in a dedicated Qdrant collection:
+
+1. Append raw messages to the session store (for `/history`).
+2. Call the extraction LLM with the new transcript → JSON array of fact strings.
+3. For each candidate fact: embed it and run a similarity check against existing facts.
+   If cosine score ≥ `dedup_threshold` → skip (already known). Otherwise upsert to
+   Qdrant (`{collection}_facts` — separate from the main message store).
+4. `aget_context(query=...)` → semantic search over facts → return as one system message
+   listing the relevant facts. Without a query, return all known facts.
+
+**Separate LLM**: set `OPENMEMORY_FACTS_LLM_PROVIDER` / `OPENMEMORY_FACTS_LLM_MODEL`.
+
+---
+
+### `graph` — knowledge graph (networkx, Neo4j/Graphiti planned)
+
+**What it does** — an LLM extracts (subject, predicate, object) triplets from each turn
+and accumulates them into a session-scoped `networkx.DiGraph`. On query, entity names
+are extracted from the query text (heuristic: capitalised words) and the graph is
+traversed up to `hops` steps to find related triplets, returned as a system message:
+
+1. Append raw messages to the session store (for `/history`).
+2. Call the extraction LLM → JSON array of `[subject, predicate, object]` triplets.
+3. Add new edges to the in-process `NetworkxGraphStore` (first-write-wins per edge).
+4. `aget_context(query=...)` → extract entities → `neighborhood(entities, hops=N)` →
+   return subgraph as a system message. Without a query, returns all edges.
+
+**Future backend**: the `GraphStore` protocol is stable — a `Neo4jGraphStore` or
+`GraphitiStore` can slot in behind it without changing `GraphMemory`.
+
+**Separate LLM**: set `OPENMEMORY_GRAPH_LLM_PROVIDER` / `OPENMEMORY_GRAPH_LLM_MODEL`.
+
+---
+
 ## Strategy cheat-sheet
 
-| Strategy | What it feeds the model | When to use |
-|---|---|---|
-| `buffer` | Everything, always | Short chats, debugging, when you manage truncation yourself |
-| `window` | The most recent N turns | Fixed-length context, streaming demos, bounded cost |
-| `vector` | The most semantically relevant turns | Query-driven retrieval, knowledge-base style |
-| `hybrid` | Recent turns + semantically relevant turns | **Default for most assistants** |
-| `hierarchical` | Recent tail + summary + archival hits | Very long sessions, agents, bounded-memory research |
-
-The `summary`, `facts`, and `graph` strategies are scaffolded interfaces (stable API,
-`NotImplementedError` body) — they will get examples once implemented.
+| Strategy | What it feeds the model | LLM on add? | Vector index? | When to use |
+|---|---|---|---|---|
+| `buffer` | Everything, always | No | No | Short chats, debugging |
+| `window` | The most recent N turns | No | No | Fixed-length context, bounded cost |
+| `vector` | The most semantically relevant turns | No | Yes (messages) | Query-driven retrieval |
+| `hybrid` | Recent turns + semantically relevant turns | No | Yes (messages) | **Default for most assistants** |
+| `hierarchical` | Recent tail + summary + archival hits | Yes (summary) | Yes (messages) | Very long sessions, agents |
+| `summary` | Summary block + recent buffer | Yes (summary) | No | Long sessions, no retrieval needed |
+| `facts` | Relevant extracted facts | Yes (extraction) | Yes (facts) | Preference tracking, personal assistants |
+| `graph` | Relevant graph triplets | Yes (extraction) | No | Relationship-heavy domains, org charts |

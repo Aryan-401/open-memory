@@ -66,3 +66,18 @@ class Config(BaseSettings):
     working_context_tokens: int = 2000
     retrieval_top_k: int = 5
     embed_mode: EmbedMode = "per_message"
+
+    # --- SummaryMemory ---
+    summary_llm_provider: str | None = None  # falls back to llm_provider
+    summary_llm_model: str | None = None     # falls back to llm_model
+    summary_buffer_size: int = 6             # recent messages kept verbatim
+
+    # --- FactExtractionMemory ---
+    facts_llm_provider: str | None = None   # falls back to llm_provider
+    facts_llm_model: str | None = None      # falls back to llm_model
+    facts_dedup_threshold: float = 0.85     # cosine similarity above which a fact is a duplicate
+
+    # --- GraphMemory ---
+    graph_llm_provider: str | None = None   # falls back to llm_provider
+    graph_llm_model: str | None = None      # falls back to llm_model
+    graph_hops: int = 1                     # neighborhood traversal depth

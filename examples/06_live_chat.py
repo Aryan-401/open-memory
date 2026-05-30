@@ -32,15 +32,94 @@ from openmemory.core.models import Message, to_openai_messages
 from openmemory.core.tokens import count_messages_tokens
 from openmemory.llm.base import build_llm
 from openmemory.strategies.buffer import BufferMemory
+from openmemory.strategies.facts import FactExtractionMemory
+from openmemory.strategies.graph import GraphMemory
 from openmemory.strategies.hierarchical import HierarchicalMemory
 from openmemory.strategies.hybrid import HybridMemory
+from openmemory.strategies.summary import SummaryMemory
 from openmemory.strategies.vector import VectorMemory
 from openmemory.strategies.window import WindowMemory
 
 SESSION_ID = "live"
 SEMANTIC = {"vector", "hybrid", "hierarchical"}
-MODES = ["buffer", "window", "vector", "hybrid", "hierarchical"]
+LLM_MODES = {"summary", "facts", "graph"}  # modes that call LLM on every aadd
+MODES = ["buffer", "window", "vector", "hybrid", "hierarchical", "summary", "facts", "graph"]
 EMBED_MODES = ["per_message", "paired"]
+
+# ---------------------------------------------------------------------------
+# Tab completion
+# ---------------------------------------------------------------------------
+
+_COMMANDS = [
+    "/mode", "/embed-mode", "/context", "/search",
+    "/history", "/clear", "/help", "/quit",
+]
+
+# Commands that take a fixed set of arguments get suggestions for those too.
+_COMMAND_ARGS: dict[str, list[str]] = {
+    "/mode": MODES,
+    "/embed-mode": EMBED_MODES,
+    "/embed_mode": EMBED_MODES,  # alias accepted by the dispatcher
+}
+
+
+class _TabCompleter:
+    """readline-based tab completion for /commands.
+
+    Handles two levels:
+      - partial command name  → complete to a full command (e.g. "/mo" → "/mode ")
+      - command + partial arg → complete to a known argument value
+                                (e.g. "/mode buf" → "buffer")
+
+    Caches the match list on state=0 so successive Tab presses are consistent.
+    """
+
+    def __init__(self) -> None:
+        self._matches: list[str] = []
+
+    def complete(self, text: str, state: int) -> str | None:
+        try:
+            import readline
+            if state == 0:
+                self._matches = self._build(readline.get_line_buffer())
+            return self._matches[state]
+        except IndexError:
+            return None
+        except Exception:
+            return None
+
+    @staticmethod
+    def _build(line: str) -> list[str]:
+        if not line.startswith("/"):
+            return []
+        parts = line.split()
+        trailing = line.endswith(" ")
+        if not parts:
+            return []
+
+        if len(parts) == 1 and not trailing:
+            # Still typing the command name itself.
+            partial = parts[0]
+            return [c + " " for c in _COMMANDS if c.startswith(partial)]
+
+        # Command is complete; suggest argument values if known.
+        cmd = parts[0]
+        partial = "" if trailing else parts[-1]
+        return [m for m in _COMMAND_ARGS.get(cmd, []) if m.startswith(partial)]
+
+
+def _setup_readline() -> None:
+    """Wire up tab completion via readline (no-op if readline is unavailable)."""
+    try:
+        import readline
+        completer = _TabCompleter()
+        readline.set_completer(completer.complete)
+        # Only split on space/tab so "/embed-mode" stays as one token.
+        readline.set_completer_delims(" \t")
+        readline.parse_and_bind("tab: complete")
+    except ImportError:
+        pass  # readline not available on Windows; graceful degradation
+
 
 # ANSI colour codes (terminals that don't support them will show plain text)
 DIM    = "\033[2m"
@@ -51,10 +130,12 @@ RESET  = "\033[0m"
 
 HELP = """\
 commands:
-  /mode <name>        switch strategy: buffer | window | vector | hybrid | hierarchical
-  /embed-mode <name>  switch embedding mode: per_message | paired
+  /mode <name>        switch strategy:
+                        buffer | window | vector | hybrid | hierarchical
+                        summary | facts | graph
+  /embed-mode <name>  switch embedding mode (semantic modes): per_message | paired
   /context [query]    show context that would be sent to the model (no LLM call)
-  /search <query>     semantic search over history (semantic modes only)
+  /search <query>     semantic search (vector/hybrid/hierarchical/facts modes)
   /history            print the full stored conversation
   /clear              wipe the session
   /help               show this help
@@ -279,6 +360,67 @@ class LiveChat:
                  f"archival({len(unique_archival)}) + working({len(working)}) = {total} messages")
             context_msgs = await memory.aget_context(query=text)
 
+        elif isinstance(memory, SummaryMemory):
+            # Summary: rolling LLM summary + verbatim recent buffer.
+            all_msgs = await memory._store.get_all(SESSION_ID)
+            _, body = memory._split_system(all_msgs)
+            buffer_msgs = body[memory._summarized_count:]
+            summarized = memory._summarized_count
+            step("[summary] ── tier overview ────────────────────────")
+            step(f"[summary] total stored   : {len(all_msgs)} messages")
+            step(f"[summary] summarized     : {summarized} messages folded into rolling summary")
+            step(f"[summary] verbatim buffer: {len(buffer_msgs)} recent messages "
+                 f"(buffer_size={memory._buffer_size})")
+            if memory._summary:
+                step(f"[summary] rolling summary: PRESENT ({len(memory._summary)} chars)")
+            else:
+                step("[summary] rolling summary: none yet (buffer not yet exceeded)")
+            context_msgs = await memory.aget_context()
+            step(f"[summary] assembled: {len(context_msgs)} messages "
+                 f"(system + summary_block + buffer)")
+
+        elif isinstance(memory, FactExtractionMemory):
+            # Facts: retrieve relevant facts from Qdrant, return as a system message.
+            col = self.cfg.qdrant_collection + "_facts"
+            known = len(memory._fact_texts)
+            step("[facts] ── fact store overview ───────────────────")
+            step(f"[facts] known facts: {known} (in-process list + Qdrant collection={col})")
+            step(f"[facts] dedup_threshold: {memory._dedup_threshold}")
+            step(f"[facts] embed query: {text[:60]!r}")
+            t_embed = time.monotonic()
+            results = await memory.asearch(text, k=memory._top_k)
+            elapsed_embed = (time.monotonic() - t_embed) * 1000
+            if results:
+                scores_str = ", ".join(f"{r.score:.3f}" for r in results)
+                step(f"[facts] Qdrant facts search → {len(results)} hits "
+                     f"(scores: {scores_str}) [{elapsed_embed:.0f}ms]")
+            else:
+                step(f"[facts] Qdrant facts search → no results yet [{elapsed_embed:.0f}ms]")
+            context_msgs = await memory.aget_context(query=text)
+            if context_msgs:
+                step(f"[facts] context: 1 system message listing {len(results)} relevant facts")
+            else:
+                step("[facts] context: empty (no facts stored yet)")
+
+        elif isinstance(memory, GraphMemory):
+            # Graph: extract entities from query, traverse networkx graph neighbourhood.
+            from openmemory.strategies.graph import _extract_entities
+            g = memory._graph_store
+            nodes = g.node_count(SESSION_ID)
+            edges = g.edge_count(SESSION_ID)
+            step("[graph] ── graph overview ──────────────────────────")
+            step(f"[graph] networkx DiGraph: {nodes} nodes, {edges} edges")
+            step(f"[graph] hops={memory._hops} (neighbourhood traversal depth)")
+            entities = _extract_entities(text)
+            step(f"[graph] extracted entities from query: {entities or '(none detected)'}")
+            triplets = await g.neighborhood(SESSION_ID, entities, hops=memory._hops)
+            step(f"[graph] neighbourhood traversal → {len(triplets)} relevant triplets")
+            context_msgs = await memory.aget_context(query=text)
+            if context_msgs:
+                step(f"[graph] context: 1 system message with {len(triplets)} triplets")
+            else:
+                step("[graph] context: empty (no graph built yet)")
+
         else:
             context_msgs = await sess.aget_context(query=text)
 
@@ -313,16 +455,56 @@ class LiveChat:
             else:
                 step(f"embed 2 messages individually → upsert to Qdrant [collection={col}]")
             step("append 2 messages to session store (full text + metadata)")
+        elif self.mode == "summary":
+            step("append 2 messages to session store → check if buffer exceeded → "
+                 "compress overflow via LLM if needed")
+        elif self.mode == "facts":
+            step("run fact extraction LLM on user message → dedup → store new facts")
+        elif self.mode == "graph":
+            step("run triplet extraction LLM on user message → add new edges to graph")
         else:
             step("append 2 messages to session store")
+
+        # Capture pre-aadd state for post-turn reporting.
         pre_evict = getattr(memory, "_summarized_count", None)
+        pre_facts = len(memory._fact_texts) if isinstance(memory, FactExtractionMemory) else -1
+        pre_graph_edges = (
+            memory._graph_store.edge_count(SESSION_ID)
+            if isinstance(memory, GraphMemory) else -1
+        )
+        pre_sum_count = memory._summarized_count if isinstance(memory, SummaryMemory) else -1
+
         await sess.aadd(new_msgs)
+
+        # Post-aadd result lines.
         post_evict = getattr(memory, "_summarized_count", None)
         if pre_evict is not None and post_evict is not None and post_evict > pre_evict:
             evicted = post_evict - pre_evict
             step(f"[hierarchical] ⚡ working ctx exceeded budget → evicted {evicted} messages")
             step("[hierarchical]    → called LLM summarizer → rolling summary updated")
             step("[hierarchical]    → evicted messages remain searchable via Qdrant")
+
+        if pre_facts >= 0:
+            stored = len(memory._fact_texts) - pre_facts
+            if stored > 0:
+                info(f"[facts] extracted and stored {stored} new fact(s) "
+                     f"(total: {len(memory._fact_texts)})")
+            else:
+                step("[facts] no new facts stored "
+                     "(model returned none, or all matched existing facts)")
+
+        if pre_graph_edges >= 0:
+            new_edges = memory._graph_store.edge_count(SESSION_ID) - pre_graph_edges
+            if new_edges > 0:
+                info(f"[graph] added {new_edges} new edge(s) "
+                     f"(total: {memory._graph_store.edge_count(SESSION_ID)} edges)")
+            else:
+                step("[graph] no new triplets extracted")
+
+        if pre_sum_count >= 0:
+            folded = memory._summarized_count - pre_sum_count
+            if folded > 0:
+                step(f"[summary] folded {folded} messages into rolling summary")
 
         print()
 
@@ -365,21 +547,29 @@ class LiveChat:
 
     async def clear(self) -> None:
         step("deleting messages from session store...")
-        step("removing vectors from Qdrant for this session...")
+        if self.mode in SEMANTIC:
+            step("removing vectors from Qdrant for this session...")
+        elif self.mode == "facts":
+            step("removing fact vectors from Qdrant facts collection...")
         await self.session(self.mode).aclear()
-        # Also reset hierarchical summary state if present.
-        if "hierarchical" in self._sessions:
-            h = self._sessions["hierarchical"].memory  # type: ignore[attr-defined]
-            if isinstance(h, HierarchicalMemory):
-                h._summary = ""
-                h._summarized_count = 0
+        # Reset in-process state on cached strategy instances.
+        for _key, sess_obj in self._sessions.items():
+            mem = sess_obj.memory  # type: ignore[attr-defined]
+            if isinstance(mem, (HierarchicalMemory, SummaryMemory)):
+                mem._summary = ""
+                mem._summarized_count = 0
+            elif isinstance(mem, FactExtractionMemory):
+                mem._fact_texts.clear()
         print("  session cleared")
 
     async def run(self) -> None:
+        _setup_readline()
         banner(self.mode, PROVIDER)
         print(f"{DIM}  internal steps shown in grey  —  /help for commands{RESET}\n")
         while True:
-            em_label = f",embed={self.embed_mode}" if self.mode in SEMANTIC else ""
+            em_label = (
+                f",embed={self.embed_mode}" if self.mode in SEMANTIC else ""
+            )
             prompt = f"({self.mode}{em_label}) you> "
             try:
                 line = (await asyncio.to_thread(input, prompt)).strip()

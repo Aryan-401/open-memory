@@ -20,7 +20,7 @@ from .core.models import EmbedMode, Message, RetrievalResult, embed_texts, to_op
 from .session import Session
 from .strategies.buffer import BufferMemory
 from .strategies.facts import FactExtractionMemory
-from .strategies.graph import GraphMemory
+from .strategies.graph import GraphMemory, NetworkxGraphStore
 from .strategies.hierarchical import HierarchicalMemory
 from .strategies.hybrid import HybridMemory
 from .strategies.summary import SummaryMemory
@@ -48,4 +48,5 @@ __all__ = [
     "SummaryMemory",
     "FactExtractionMemory",
     "GraphMemory",
+    "NetworkxGraphStore",
 ]
