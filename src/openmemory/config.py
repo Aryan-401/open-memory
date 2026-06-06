@@ -81,3 +81,8 @@ class Config(BaseSettings):
     graph_llm_provider: str | None = None   # falls back to llm_provider
     graph_llm_model: str | None = None      # falls back to llm_model
     graph_hops: int = 1                     # neighborhood traversal depth
+
+    # --- BM25 (SparseHybridMemory / FullHybridMemory) ---
+    bm25_k1: float = 1.5                    # term-saturation parameter
+    bm25_b: float = 0.75                    # length-normalisation factor
+    rrf_k: int = 60                         # RRF rank-smoothing constant
