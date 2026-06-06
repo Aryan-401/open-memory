@@ -16,20 +16,24 @@ from .embeddings.base import Embedder, build_embedder
 from .llm.base import LLM, build_llm
 from .llm.summarizer import Summarizer
 from .session import Session
+from .storage.bm25_store import BM25Store
 from .storage.qdrant_store import QdrantVectorStore
 from .storage.session_store import InMemorySessionStore, SessionStore
 from .storage.sqlite_store import SQLiteSessionStore
 from .strategies.buffer import BufferMemory
 from .strategies.facts import FactExtractionMemory
+from .strategies.full_hybrid import FullHybridMemory
 from .strategies.graph import GraphMemory, NetworkxGraphStore
 from .strategies.hierarchical import HierarchicalMemory
 from .strategies.hybrid import HybridMemory
+from .strategies.sparse_hybrid import SparseHybridMemory
 from .strategies.summary import SummaryMemory
 from .strategies.vector import VectorMemory
 from .strategies.window import WindowMemory
 
 Strategy = Literal[
-    "buffer", "window", "vector", "hybrid", "hierarchical", "summary", "facts", "graph"
+    "buffer", "window", "vector", "hybrid", "sparse_hybrid", "full_hybrid",
+    "hierarchical", "summary", "facts", "graph",
 ]
 
 
@@ -48,6 +52,7 @@ class OpenMemory:
         self._fact_vectors: QdrantVectorStore | None = None
         self._summarizer: Summarizer | None = None
         self._nx_graph: NetworkxGraphStore | None = None
+        self._bm25: BM25Store | None = None
 
     # --- Lazy shared resources ---
 
@@ -97,6 +102,11 @@ class OpenMemory:
         if self._nx_graph is None:
             self._nx_graph = NetworkxGraphStore()
         return self._nx_graph
+
+    def _bm25_store(self) -> BM25Store:
+        if self._bm25 is None:
+            self._bm25 = BM25Store(k1=self.config.bm25_k1, b=self.config.bm25_b)
+        return self._bm25
 
     def _strategy_llm(
         self, provider_override: str | None, model_override: str | None
@@ -166,6 +176,32 @@ class OpenMemory:
             params.update(overrides)
             return HybridMemory(
                 session_id, store, self._embedder_(), self._vector_store(), **params
+            )
+
+        if strategy == "sparse_hybrid":
+            params = {
+                "top_k": cfg.retrieval_top_k,
+                "embed_mode": cfg.embed_mode,
+                "rrf_k": cfg.rrf_k,
+            }
+            params.update(overrides)
+            return SparseHybridMemory(
+                session_id, store, self._embedder_(), self._vector_store(),
+                self._bm25_store(), **params,
+            )
+
+        if strategy == "full_hybrid":
+            params = {
+                "window_size": cfg.window_size,
+                "top_k": cfg.retrieval_top_k,
+                "embed_mode": cfg.embed_mode,
+                "model": cfg.llm_model,
+                "rrf_k": cfg.rrf_k,
+            }
+            params.update(overrides)
+            return FullHybridMemory(
+                session_id, store, self._embedder_(), self._vector_store(),
+                self._bm25_store(), **params,
             )
 
         if strategy == "hierarchical":
