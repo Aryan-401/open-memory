@@ -51,11 +51,31 @@ call the `a`-prefixed methods from inside an event loop.
 | `buffer` | Full history, replayed verbatim. The "list of dicts." | — |
 | `window` | Most recent N turns and/or a token budget; keeps the system message. | — |
 | `vector` | Semantic retrieval over Qdrant. | embedder + Qdrant |
-| `hybrid` | Recent window **∪** semantic retrieval, deduped. **Recommended default.** | embedder + Qdrant |
-| `hierarchical` | MemGPT-style working context + rolling summary + archival paging. | embedder + Qdrant + LLM |
+| `hybrid` | Recent window **∪** semantic retrieval, deduped, chronological output. | embedder + Qdrant |
+| `sparse_hybrid` | BM25 lexical **∪** dense vector, fused via Reciprocal Rank Fusion (RRF). | embedder + Qdrant |
+| `full_hybrid` | Recency window **∪** BM25 **∪** dense vector, three-way RRF. Best coverage. | embedder + Qdrant |
+| `hierarchical` | MemGPT-style: token-bounded working context + LLM rolling summary + archival. | embedder + Qdrant + LLM |
 | `summary` | *Scaffold* — rolling summary + recent buffer. | (planned) |
 | `facts` | *Scaffold* — mem0-style fact extraction. | (planned) |
 | `graph` | *Scaffold* — entity/relationship graph retrieval. | (planned) |
+
+### Hybrid strategies at a glance
+
+Four strategies compose multiple retrieval signals. The table below shows how each
+pair differs — read row-by-column: "what does the row strategy have that the column
+strategy lacks?"
+
+|  | **`hybrid`** | **`sparse_hybrid`** | **`full_hybrid`** | **`hierarchical`** |
+|---|---|---|---|---|
+| **`hybrid`** | — | Has a recency guarantee; lacks keyword precision | `full_hybrid` adds BM25 on top; `hybrid` has no keyword channel | `hierarchical` bounds context by LLM eviction; `hybrid` grows unbounded |
+| **`sparse_hybrid`** | Has keyword precision (BM25); no recency guarantee | — | `full_hybrid` adds a recency window; `sparse_hybrid` is pure retrieval with no temporal bias | `hierarchical` compresses via LLM rolling summary; `sparse_hybrid` retrieves all turns forever |
+| **`full_hybrid`** | Adds BM25 keyword channel to `hybrid`; three-way RRF over all signals | Adds recency window to `sparse_hybrid`; temporal signal participates in RRF | — | `hierarchical` is token-budget-bounded with eviction; `full_hybrid` grows unbounded but has richer retrieval |
+| **`hierarchical`** | Compresses old turns into a rolling LLM summary; `hybrid` keeps all turns in raw form | Uses LLM eviction + archival for bounded context; `sparse_hybrid` retains all turns without compression | Same LLM-eviction model; `full_hybrid` trades compression for richer three-way fusion | — |
+
+**Rule of thumb:**
+- Keyword-heavy queries (names, IDs, codes) → `sparse_hybrid` or `full_hybrid`
+- Very long sessions where context budget matters → `hierarchical`
+- Default chat assistant → `hybrid` or `full_hybrid`
 
 Per-session overrides go straight to the strategy:
 
@@ -111,4 +131,5 @@ uv run mypy src/
 - Implement the `summary`, `facts` (mem0-style), and `graph` strategies (interfaces are
   already in place via `BaseMemory` and `GraphStore`).
 - Restart-durable rolling summaries for hierarchical memory.
-- Reranking on top of vector retrieval.
+- Cross-encoder reranking as a post-retrieval step on top of `sparse_hybrid` / `full_hybrid`.
+- Persistent BM25 index (SQLite FTS5 backend) so lexical recall survives restarts.
